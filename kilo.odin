@@ -30,8 +30,6 @@ EditorConfig :: struct {
 @(private = "file")
 E: EditorConfig
 
-@(private = "file")
-abuf: [dynamic]byte
 
 /* Helpers */
 write_stdout :: proc(s: string) -> (n: int, err: os.Error) {
@@ -44,7 +42,8 @@ posix_write_stdout :: proc "c" (s: string) {
 
 /* Terminal */
 die :: proc "c" (s: cstring) -> int {
-	editor_refresh_screen()
+	posix_write_stdout("\x1b[2J")
+	posix_write_stdout("\x1b[H")
 	libc.perror(s)
 	libc.exit(1)
 }
@@ -75,13 +74,6 @@ enable_raw_mode :: proc "c" () {
 	}
 }
 
-editor_refresh_screen :: proc "c" () {
-	posix_write_stdout("\x1b[2J")
-}
-
-editor_position_cursor :: proc "c" () {
-	posix_write_stdout("\x1b[H")
-}
 
 /* Editor */
 init_editor :: proc() {
@@ -136,21 +128,33 @@ get_cursor_position :: proc(rows: ^u16, cols: ^u16) -> int {
 	return 0
 }
 
-editor_draw_columns :: proc() {
-	tilde := "~"
-	nl := "\r\n"
+editor_draw_rows :: proc(abuf: ^[dynamic]byte) {
 	for i: u16 = 0; i < E.screencols; i += 1 {
-		os.write(os.stdin, transmute([]u8)tilde)
+		append(abuf, "~")
+		append(abuf, "\x1b[K") // Clear the line bline
 		if (i < E.screencols - 1) {
-			os.write(os.stdin, transmute([]u8)nl)
+			append(abuf, "\r\n")
 		}
 	}
 }
 
+editor_refresh_screen :: proc() {
+	abuf: [dynamic]byte
+	append(&abuf, "\x1b[?25l")
+	append(&abuf, "\x1b[H")
+	editor_draw_rows(&abuf)
+	append(&abuf, "\x1b[H")
+	append(&abuf, "\x1b[?25h")
+	os.write(os.stdout, abuf[:])
+}
+
+/* Editor */
+
 editor_process_key_presses :: proc() {
 	c: byte = editor_read_key()
 	if c == ctrl_key('q') {
-		editor_refresh_screen()
+		write_stdout("\x1b[2J")
+		write_stdout("\x1b[H")
 		libc.exit(libc.EXIT_SUCCESS)
 	}
 }
@@ -167,6 +171,7 @@ editor_read_key :: proc() -> byte {
 		}
 	}
 }
+
 ctrl_key :: proc(c: byte) -> byte {
 	return c & 0x1f
 }
@@ -176,10 +181,7 @@ main :: proc() {
 	enable_raw_mode()
 	init_editor()
 	for {
-		editor_position_cursor()
 		editor_refresh_screen()
-		editor_draw_columns()
-		editor_position_cursor()
 		editor_process_key_presses()
 	}
 	return
