@@ -13,12 +13,16 @@ foreign libc2 {
 	ioctl :: proc(fd: i32, request: u64, #c_vararg args: ..any) -> i32 ---
 }
 
+
 Winsize :: struct {
 	ws_row:    u16,
 	ws_col:    u16,
 	ws_xpixel: u16,
 	ws_ypixel: u16,
 }
+
+
+KILO_VERSION := "0.0.1"
 
 EditorConfig :: struct {
 	orig_termios: posix.termios,
@@ -36,9 +40,11 @@ write_stdout :: proc(s: string) -> (n: int, err: os.Error) {
 	return os.write(os.stdout, transmute([]u8)s)
 }
 
+
 posix_write_stdout :: proc "c" (s: string) {
 	posix.write(posix.STDOUT_FILENO, raw_data(s), len(s))
 }
+
 
 /* Terminal */
 die :: proc "c" (s: cstring) -> int {
@@ -48,12 +54,14 @@ die :: proc "c" (s: cstring) -> int {
 	libc.exit(1)
 }
 
+
 disable_raw_mode :: proc "c" () {
 	res := posix.tcsetattr(posix.STDIN_FILENO, .TCSAFLUSH, &E.orig_termios)
 	if res == .FAIL {
 		die("tcsetattr")
 	}
 }
+
 
 enable_raw_mode :: proc "c" () {
 	res := posix.tcgetattr(posix.STDIN_FILENO, &E.orig_termios)
@@ -128,15 +136,36 @@ get_cursor_position :: proc(rows: ^u16, cols: ^u16) -> int {
 	return 0
 }
 
+
 editor_draw_rows :: proc(abuf: ^[dynamic]byte) {
-	for i: u16 = 0; i < E.screencols; i += 1 {
-		append(abuf, "~")
-		append(abuf, "\x1b[K") // Clear the line bline
-		if (i < E.screencols - 1) {
+	for y: u16 = 0; y < E.screenrows; y += 1 {
+		if y == E.screenrows / 3 {
+			welcome: [80]byte
+			welcome_string := fmt.bprintf(welcome[:], "Kilo editor -- version %s", KILO_VERSION)
+			welcome_len := len(welcome_string)
+			if welcome_len > auto_cast E.screencols {
+				welcome_len = auto_cast E.screencols
+			}
+			padding := (E.screencols - auto_cast welcome_len) / 2
+			if padding > 0 {
+				append(abuf, "~")
+				padding -= 1
+			}
+
+			for i: u16 = 0; i < padding; i += 1 {
+				append(abuf, " ")
+			}
+			append(abuf, welcome_string)
+		} else {
+			append(abuf, "~")
+		}
+		append(abuf, "\x1b[K") // Clear the line.
+		if (y < E.screenrows - 1) {
 			append(abuf, "\r\n")
 		}
 	}
 }
+
 
 editor_refresh_screen :: proc() {
 	abuf: [dynamic]byte
@@ -149,7 +178,6 @@ editor_refresh_screen :: proc() {
 }
 
 /* Editor */
-
 editor_process_key_presses :: proc() {
 	c: byte = editor_read_key()
 	if c == ctrl_key('q') {
@@ -158,6 +186,7 @@ editor_process_key_presses :: proc() {
 		libc.exit(libc.EXIT_SUCCESS)
 	}
 }
+
 
 editor_read_key :: proc() -> byte {
 	c: [1]byte
@@ -171,6 +200,7 @@ editor_read_key :: proc() -> byte {
 		}
 	}
 }
+
 
 ctrl_key :: proc(c: byte) -> byte {
 	return c & 0x1f
