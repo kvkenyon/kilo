@@ -24,6 +24,10 @@ Winsize :: struct {
 
 KILO_VERSION :: "0.0.1"
 
+ERow :: struct {
+	size:  int,
+	chars: [dynamic]byte,
+}
 
 EditorConfig :: struct {
 	orig_termios: posix.termios,
@@ -31,6 +35,8 @@ EditorConfig :: struct {
 	screencols:   u16,
 	cx:           u16,
 	cy:           u16,
+	numrows:      int,
+	row:          ERow,
 }
 
 EditorKey :: enum {
@@ -40,6 +46,9 @@ EditorKey :: enum {
 	ARROW_RIGHT,
 	PAGE_UP,
 	PAGE_DOWN,
+	HOME_KEY,
+	END_KEY,
+	DELETE_KEY,
 }
 
 
@@ -94,10 +103,28 @@ enable_raw_mode :: proc "c" () {
 	}
 }
 
+/* File I/O */
+
+editor_open :: proc(filename: string) {
+	file, err := os.open(filename, os.O_RDWR)
+	if err != nil do die("editor_open")
+	content, e := os.read_entire_file_from_file(file, context.allocator)
+	line: [dynamic]byte
+	for c in content {
+		if c != '\n' && c != '\r' {
+			append(&E.row.chars, c)
+		} else {
+			break
+		}
+	}
+	E.row.size = len(E.row.chars)
+	E.numrows += 1
+}
 
 /* Editor */
+
 init_editor :: proc() {
-	E.cx, E.cy = 0, 0
+	E.cx, E.cy, E.numrows = 0, 0, 0
 	if res := get_window_size(&E.screencols, &E.screenrows); res == -1 do die("get_window_size")
 }
 
@@ -135,20 +162,36 @@ get_cursor_position :: proc(rows: ^u16, cols: ^u16) -> int {
 
 editor_draw_rows :: proc(abuf: ^[dynamic]byte) {
 	for y: u16 = 0; y < E.screenrows; y += 1 {
-		if y == E.screenrows / 3 {
-			welcome: [80]byte
-			welcome_string := fmt.bprintf(welcome[:], "Kilo editor -- version %s", KILO_VERSION)
-			welcome_len := len(welcome_string)
-			if welcome_len > auto_cast E.screencols do welcome_len = auto_cast E.screencols
-			padding := (E.screencols - auto_cast welcome_len) / 2
-			if padding > 0 {
+		if cast(int)y >= E.numrows {
+			if y == E.screenrows / 3 {
+				welcome: [80]byte
+				welcome_string := fmt.bprintf(
+					welcome[:],
+					"Kilo editor -- version %s",
+					KILO_VERSION,
+				)
+				welcome_len := len(welcome_string)
+				if welcome_len > auto_cast E.screencols do welcome_len = auto_cast E.screencols
+				padding := (E.screencols - auto_cast welcome_len) / 2
+				if padding > 0 {
+					append(abuf, "~")
+					padding -= 1
+				}
+				for i: u16 = 0; i < padding; i += 1 do append(abuf, " ")
+				append(abuf, welcome_string)
+			} else {
 				append(abuf, "~")
-				padding -= 1
 			}
-			for i: u16 = 0; i < padding; i += 1 do append(abuf, " ")
-			append(abuf, welcome_string)
 		} else {
-			append(abuf, "~")
+			length: int
+			if len(E.row.chars) > auto_cast E.screencols {
+				length = cast(int)E.screencols
+			} else {
+				length = len(E.row.chars)
+			}
+			for i in 0 ..< length {
+				append(abuf, E.row.chars[i])
+			}
 		}
 		append(abuf, "\x1b[K") // Clear the line.
 		if (y < E.screenrows - 1) do append(abuf, "\r\n")
@@ -170,7 +213,6 @@ editor_refresh_screen :: proc() {
 }
 
 /* Input */
-
 editor_move_cursor :: proc(key: int) {
 	switch key {
 	case auto_cast EditorKey.ARROW_DOWN:
@@ -199,14 +241,10 @@ editor_process_key_presses :: proc() {
 		write_stdout("\x1b[2J")
 		write_stdout("\x1b[H")
 		libc.exit(libc.EXIT_SUCCESS)
-	case auto_cast EditorKey.ARROW_UP:
-		fallthrough
-	case auto_cast EditorKey.ARROW_DOWN:
-		fallthrough
-	case auto_cast EditorKey.ARROW_RIGHT:
-		fallthrough
-	case auto_cast EditorKey.ARROW_LEFT:
-		editor_move_cursor(c)
+	case auto_cast EditorKey.HOME_KEY:
+		E.cx = 0
+	case auto_cast EditorKey.END_KEY:
+		E.cx = E.screencols - 1
 	case auto_cast EditorKey.PAGE_UP:
 		fallthrough
 	case auto_cast EditorKey.PAGE_DOWN:
@@ -216,6 +254,16 @@ editor_process_key_presses :: proc() {
 				c == auto_cast EditorKey.PAGE_UP ? auto_cast EditorKey.ARROW_UP : auto_cast EditorKey.ARROW_DOWN,
 			)
 		}
+	case auto_cast EditorKey.ARROW_UP:
+		fallthrough
+	case auto_cast EditorKey.ARROW_DOWN:
+		fallthrough
+	case auto_cast EditorKey.ARROW_RIGHT:
+		fallthrough
+	case auto_cast EditorKey.ARROW_LEFT:
+		editor_move_cursor(c)
+	case auto_cast EditorKey.DELETE_KEY:
+		fallthrough
 	}
 }
 
@@ -238,10 +286,20 @@ editor_read_key :: proc() -> int {
 				if n, err := os.read_ptr(os.stdin, &seq[2], 1); n != 1 do return '\x1b'
 				if seq[2] == '~' {
 					switch seq[1] {
+					case '1':
+						return auto_cast EditorKey.HOME_KEY
+					case '3':
+						return auto_cast EditorKey.DELETE_KEY
+					case '4':
+						return auto_cast EditorKey.END_KEY
 					case '5':
 						return auto_cast EditorKey.PAGE_UP
 					case '6':
 						return auto_cast EditorKey.PAGE_DOWN
+					case '7':
+						return auto_cast EditorKey.HOME_KEY
+					case '8':
+						return auto_cast EditorKey.END_KEY
 					}
 				}
 			} else {
@@ -254,7 +312,18 @@ editor_read_key :: proc() -> int {
 					return auto_cast EditorKey.ARROW_RIGHT
 				case 'D':
 					return auto_cast EditorKey.ARROW_LEFT
+				case 'H':
+					return auto_cast EditorKey.HOME_KEY
+				case 'F':
+					return auto_cast EditorKey.END_KEY
 				}
+			}
+		} else if (seq[0] == 'O') {
+			switch seq[1] {
+			case 'H':
+				return auto_cast EditorKey.HOME_KEY
+			case 'F':
+				return auto_cast EditorKey.END_KEY
 			}
 		}
 		return '\x1b'
@@ -272,6 +341,9 @@ ctrl_key :: proc(c: byte) -> int {
 main :: proc() {
 	enable_raw_mode()
 	init_editor()
+	if len(os.args) >= 2 {
+		editor_open(os.args[1])
+	}
 	for {
 		editor_refresh_screen()
 		editor_process_key_presses()
