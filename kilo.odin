@@ -1,8 +1,7 @@
 package main
-
-import "core:bufio"
 import "core:c/libc"
 import "core:fmt"
+import "core:log"
 import "core:os"
 import "core:strings"
 import "core:sys/darwin"
@@ -32,12 +31,14 @@ ERow :: struct {
 
 EditorConfig :: struct {
 	orig_termios: posix.termios,
-	screenrows:   u16,
-	screencols:   u16,
-	cx:           u16,
-	cy:           u16,
-	numrows:      int,
+	screenrows:   uint,
+	screencols:   uint,
+	cx:           uint,
+	cy:           uint,
 	rows:         [dynamic]ERow,
+	numrows:      uint,
+	coloffset:    uint,
+	rowoffset:    uint,
 }
 
 EditorKey :: enum {
@@ -128,26 +129,29 @@ editor_append_row :: proc(line: string) {
 /* Editor */
 
 init_editor :: proc() {
-	E.cx, E.cy, E.numrows = 0, 0, 0
+	log.info("init_editor")
+	E.cx, E.cy, E.numrows, E.rowoffset, E.coloffset = 0, 0, 0, 0, 0
 	if res := get_window_size(&E.screencols, &E.screenrows); res == -1 do die("get_window_size")
+	log.infof("window_size = (%d, %d)", E.screenrows, E.screencols)
 }
 
 
-get_window_size :: proc(cols: ^u16, rows: ^u16) -> int {
+get_window_size :: proc(cols: ^uint, rows: ^uint) -> int {
 	ws: Winsize
 	result := ioctl(posix.STDOUT_FILENO, darwin.TIOCGWINSZ, &ws)
 	if result == -1 || ws.ws_col == 0 {
+		log.warnf("failed to get windowsize from ioctl")
 		n, err := write_stdout("\x1b[999C\x1b[999B")
 		if n != 12 || err != nil do return -1
 		return get_cursor_position(rows, cols)
 	}
-	cols^ = ws.ws_col
-	rows^ = ws.ws_row
+	cols^ = cast(uint)ws.ws_col
+	rows^ = cast(uint)ws.ws_row
 	return 0
 }
 
 
-get_cursor_position :: proc(rows: ^u16, cols: ^u16) -> int {
+get_cursor_position :: proc(rows: ^uint, cols: ^uint) -> int {
 	write_stdout("\x1b[6n") // Get cursor status.
 	buf: [32]byte
 	i: int = 0
@@ -159,14 +163,16 @@ get_cursor_position :: proc(rows: ^u16, cols: ^u16) -> int {
 	if buf[0] != '\x1b' || buf[1] != '[' do return -1
 	size_str: cstring = strings.clone_to_cstring(transmute(string)buf[2:i])
 	res := libc.sscanf(size_str, "%d;%d", rows, cols)
+	log.infof("cursor_position = (%d, %d)", rows, cols)
 	if res != 2 do return -1
 	return 0
 }
 
 
 editor_draw_rows :: proc(abuf: ^[dynamic]byte) {
-	for y: u16 = 0; y < E.screenrows; y += 1 {
-		if cast(int)y >= E.numrows {
+	for y: uint = 0; y < E.screenrows; y += 1 {
+		filerow := y + E.rowoffset
+		if y >= E.numrows {
 			if y == E.screenrows / 3 && E.numrows == 0 {
 				welcome: [80]byte
 				welcome_string := fmt.bprintf(
@@ -176,25 +182,22 @@ editor_draw_rows :: proc(abuf: ^[dynamic]byte) {
 				)
 				welcome_len := len(welcome_string)
 				if welcome_len > auto_cast E.screencols do welcome_len = auto_cast E.screencols
-				padding := (E.screencols - auto_cast welcome_len) / 2
+				padding: uint = (E.screencols - auto_cast welcome_len) / 2
 				if padding > 0 {
 					append(abuf, "~")
 					padding -= 1
 				}
-				for i: u16 = 0; i < padding; i += 1 do append(abuf, " ")
+				for i: uint = 0; i < padding; i += 1 do append(abuf, " ")
 				append(abuf, welcome_string)
 			} else {
 				append(abuf, "~")
 			}
 		} else {
-			length: int
-			erow := E.rows[y]
-			if erow.size > auto_cast E.screencols {
-				length = cast(int)E.screencols
-			} else {
-				length = erow.size
-			}
-			for i in 0 ..< length {
+			erow := E.rows[filerow]
+			len := erow.size - cast(int)E.coloffset
+			if len < 0 do len = 0
+			if len > cast(int)E.screencols do len = cast(int)E.screencols
+			for i in E.coloffset ..< E.coloffset + cast(uint)len {
 				append(abuf, erow.chars[i])
 			}
 		}
@@ -203,15 +206,46 @@ editor_draw_rows :: proc(abuf: ^[dynamic]byte) {
 	}
 }
 
+editor_scroll :: proc() {
+	log.infof(
+		"before scroll: E.cy=%d E.rowoffset=%d E.cx=%d E.coloffset=%d",
+		E.cy,
+		E.rowoffset,
+		E.cx,
+		E.coloffset,
+	)
+	if E.cx < E.coloffset do E.coloffset = E.cx
+	if E.cx > E.coloffset + E.screencols - 1 {
+		E.coloffset = E.cx - E.screencols + 1
+	}
+	if E.cy < E.rowoffset do E.rowoffset = E.cy
+	if E.cy > E.rowoffset + E.screenrows - 1 {
+		E.rowoffset = E.cy - E.screenrows + 1
+	}
+	log.infof(
+		"after scroll: E.cy=%d E.rowoffset=%d E.cx=%d E.coloffset=%d",
+		E.cy,
+		E.rowoffset,
+		E.cx,
+		E.coloffset,
+	)
+}
+
 
 editor_refresh_screen :: proc() {
+	editor_scroll()
 	abuf: [dynamic]byte
 	append(&abuf, "\x1b[?25l")
 	append(&abuf, "\x1b[H")
 	editor_draw_rows(&abuf)
 	// Draw cursor
 	buf: [32]byte
-	draw_cursor := fmt.bprintf(buf[:], "\x1b[%d;%dH", E.cy + 1, E.cx + 1)
+	draw_cursor := fmt.bprintf(
+		buf[:],
+		"\x1b[%d;%dH",
+		(E.cy - E.rowoffset) + 1,
+		(E.cx - E.coloffset) + 1,
+	)
 	append(&abuf, draw_cursor)
 	append(&abuf, "\x1b[?25h")
 	os.write(os.stdout, abuf[:])
@@ -223,7 +257,7 @@ editor_refresh_screen :: proc() {
 editor_move_cursor :: proc(key: int) {
 	switch key {
 	case auto_cast EditorKey.ARROW_DOWN:
-		if E.cy != E.screenrows - 1 {
+		if E.cy < E.numrows {
 			E.cy += 1
 		}
 	case auto_cast EditorKey.ARROW_UP:
@@ -235,9 +269,7 @@ editor_move_cursor :: proc(key: int) {
 			E.cx -= 1
 		}
 	case auto_cast EditorKey.ARROW_RIGHT:
-		if E.cx != E.screencols - 1 {
-			E.cx += 1
-		}
+		E.cx += 1
 	}
 }
 
@@ -255,8 +287,8 @@ editor_process_key_presses :: proc() {
 	case auto_cast EditorKey.PAGE_UP:
 		fallthrough
 	case auto_cast EditorKey.PAGE_DOWN:
-		times := E.screenrows
-		for i: u16 = 0; i < times; i += 1 {
+		times: uint = E.screenrows - 1
+		for i: uint = 0; i < times; i += 1 {
 			editor_move_cursor(
 				c == auto_cast EditorKey.PAGE_UP ? auto_cast EditorKey.ARROW_UP : auto_cast EditorKey.ARROW_DOWN,
 			)
@@ -346,6 +378,11 @@ ctrl_key :: proc(c: byte) -> int {
 
 
 main :: proc() {
+	logh, logh_err := os.open("log.txt", (os.O_CREATE | os.O_TRUNC | os.O_RDWR))
+	logger :=
+		logh_err == os.ERROR_NONE ? log.create_file_logger(logh) : log.create_console_logger()
+	context.logger = logger
+
 	enable_raw_mode()
 	init_editor()
 	if len(os.args) >= 2 {
@@ -355,5 +392,9 @@ main :: proc() {
 		editor_refresh_screen()
 		editor_process_key_presses()
 	}
-	return
+
+	if logh_err == os.ERROR_NONE {
+		log.destroy_file_logger(logger)
+		os.close(logh)
+	}
 }
