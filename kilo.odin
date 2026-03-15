@@ -38,6 +38,8 @@ EditorKey :: enum {
 	ARROW_DOWN,
 	ARROW_LEFT,
 	ARROW_RIGHT,
+	PAGE_UP,
+	PAGE_DOWN,
 }
 
 
@@ -205,6 +207,15 @@ editor_process_key_presses :: proc() {
 		fallthrough
 	case auto_cast EditorKey.ARROW_LEFT:
 		editor_move_cursor(c)
+	case auto_cast EditorKey.PAGE_UP:
+		fallthrough
+	case auto_cast EditorKey.PAGE_DOWN:
+		times := E.screenrows
+		for i: u16 = 0; i < times; i += 1 {
+			editor_move_cursor(
+				c == auto_cast EditorKey.PAGE_UP ? auto_cast EditorKey.ARROW_UP : auto_cast EditorKey.ARROW_DOWN,
+			)
+		}
 	}
 }
 
@@ -218,20 +229,32 @@ editor_read_key :: proc() -> int {
 	}
 	key := c[0]
 	if key == '\x1b' {
-		buf: [3]byte
-		if n, err := os.read_ptr(os.stdin, &buf[0], 1); n != 1 do return '\x1b'
-		if n, err := os.read_ptr(os.stdin, &buf[1], 1); n != 1 do return '\x1b'
+		seq: [3]byte
+		if n, err := os.read_ptr(os.stdin, &seq[0], 1); n != 1 do return '\x1b'
+		if n, err := os.read_ptr(os.stdin, &seq[1], 1); n != 1 do return '\x1b'
 
-		if buf[0] == '[' {
-			switch buf[1] {
-			case 'A':
-				return auto_cast EditorKey.ARROW_UP
-			case 'B':
-				return auto_cast EditorKey.ARROW_DOWN
-			case 'C':
-				return auto_cast EditorKey.ARROW_RIGHT
-			case 'D':
-				return auto_cast EditorKey.ARROW_LEFT
+		if seq[0] == '[' {
+			if seq[1] >= '0' && seq[1] <= '9' {
+				if n, err := os.read_ptr(os.stdin, &seq[2], 1); n != 1 do return '\x1b'
+				if seq[2] == '~' {
+					switch seq[1] {
+					case '5':
+						return auto_cast EditorKey.PAGE_UP
+					case '6':
+						return auto_cast EditorKey.PAGE_DOWN
+					}
+				}
+			} else {
+				switch seq[1] {
+				case 'A':
+					return auto_cast EditorKey.ARROW_UP
+				case 'B':
+					return auto_cast EditorKey.ARROW_DOWN
+				case 'C':
+					return auto_cast EditorKey.ARROW_RIGHT
+				case 'D':
+					return auto_cast EditorKey.ARROW_LEFT
+				}
 			}
 		}
 		return '\x1b'
