@@ -1,5 +1,6 @@
 package main
 
+import "core:bufio"
 import "core:c/libc"
 import "core:fmt"
 import "core:os"
@@ -36,7 +37,7 @@ EditorConfig :: struct {
 	cx:           u16,
 	cy:           u16,
 	numrows:      int,
-	row:          ERow,
+	rows:         [dynamic]ERow,
 }
 
 EditorKey :: enum {
@@ -57,6 +58,7 @@ E: EditorConfig
 
 
 /* Helpers */
+
 write_stdout :: proc(s: string) -> (n: int, err: os.Error) {
 	return os.write(os.stdout, transmute([]u8)s)
 }
@@ -68,6 +70,7 @@ posix_write_stdout :: proc "c" (s: string) {
 
 
 /* Terminal */
+
 die :: proc "c" (s: cstring) -> int {
 	posix_write_stdout("\x1b[2J")
 	posix_write_stdout("\x1b[H")
@@ -105,19 +108,20 @@ enable_raw_mode :: proc "c" () {
 
 /* File I/O */
 
-editor_open :: proc(filename: string) {
-	file, err := os.open(filename, os.O_RDWR)
-	if err != nil do die("editor_open")
-	content, e := os.read_entire_file_from_file(file, context.allocator)
-	line: [dynamic]byte
-	for c in content {
-		if c != '\n' && c != '\r' {
-			append(&E.row.chars, c)
-		} else {
-			break
-		}
-	}
-	E.row.size = len(E.row.chars)
+editor_open :: proc(filepath: string) {
+	data, ok := os.read_entire_file(filepath, context.allocator)
+	if ok != nil do die("read_entire_file")
+	defer delete(data, context.allocator)
+	it := string(data)
+	for line in strings.split_lines_iterator(&it) do editor_append_row(line)
+}
+
+
+editor_append_row :: proc(line: string) {
+	erow := ERow{}
+	append(&erow.chars, line)
+	erow.size = len(line)
+	append(&E.rows, erow)
 	E.numrows += 1
 }
 
@@ -163,7 +167,7 @@ get_cursor_position :: proc(rows: ^u16, cols: ^u16) -> int {
 editor_draw_rows :: proc(abuf: ^[dynamic]byte) {
 	for y: u16 = 0; y < E.screenrows; y += 1 {
 		if cast(int)y >= E.numrows {
-			if y == E.screenrows / 3 {
+			if y == E.screenrows / 3 && E.numrows == 0 {
 				welcome: [80]byte
 				welcome_string := fmt.bprintf(
 					welcome[:],
@@ -184,13 +188,14 @@ editor_draw_rows :: proc(abuf: ^[dynamic]byte) {
 			}
 		} else {
 			length: int
-			if len(E.row.chars) > auto_cast E.screencols {
+			erow := E.rows[y]
+			if erow.size > auto_cast E.screencols {
 				length = cast(int)E.screencols
 			} else {
-				length = len(E.row.chars)
+				length = erow.size
 			}
 			for i in 0 ..< length {
-				append(abuf, E.row.chars[i])
+				append(abuf, erow.chars[i])
 			}
 		}
 		append(abuf, "\x1b[K") // Clear the line.
@@ -212,7 +217,9 @@ editor_refresh_screen :: proc() {
 	os.write(os.stdout, abuf[:])
 }
 
+
 /* Input */
+
 editor_move_cursor :: proc(key: int) {
 	switch key {
 	case auto_cast EditorKey.ARROW_DOWN:

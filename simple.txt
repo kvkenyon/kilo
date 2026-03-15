@@ -1,0 +1,4 @@
+hello world
+
+
+I am here to test the kilo editor.
