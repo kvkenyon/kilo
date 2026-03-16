@@ -25,7 +25,7 @@ Winsize :: struct {
 KILO_VERSION :: "0.0.1"
 
 ERow :: struct {
-	size:  int,
+	size:  uint,
 	chars: [dynamic]byte,
 }
 
@@ -194,7 +194,8 @@ editor_draw_rows :: proc(abuf: ^[dynamic]byte) {
 			}
 		} else {
 			erow := E.rows[filerow]
-			len := erow.size - cast(int)E.coloffset
+			// Cast to int to allow negatives.
+			len := cast(int)erow.size - cast(int)E.coloffset
 			if len < 0 do len = 0
 			if len > cast(int)E.screencols do len = cast(int)E.screencols
 			for i in E.coloffset ..< E.coloffset + cast(uint)len {
@@ -255,6 +256,7 @@ editor_refresh_screen :: proc() {
 /* Input */
 
 editor_move_cursor :: proc(key: int) {
+	erow := E.cy < E.numrows ? E.rows[E.cy] : ERow{}
 	switch key {
 	case auto_cast EditorKey.ARROW_DOWN:
 		if E.cy < E.numrows {
@@ -269,7 +271,13 @@ editor_move_cursor :: proc(key: int) {
 			E.cx -= 1
 		}
 	case auto_cast EditorKey.ARROW_RIGHT:
-		E.cx += 1
+		if E.cx < erow.size {
+			E.cx += 1
+		}
+	}
+	erow = E.cy < E.numrows ? E.rows[E.cy] : ERow{}
+	if erow.size < E.cx {
+		E.cx = erow.size
 	}
 }
 
@@ -283,7 +291,8 @@ editor_process_key_presses :: proc() {
 	case auto_cast EditorKey.HOME_KEY:
 		E.cx = 0
 	case auto_cast EditorKey.END_KEY:
-		E.cx = E.screencols - 1
+		erow := E.cy < E.numrows ? E.rows[E.cy] : ERow{}
+		E.cx = erow.size >= E.screencols ? E.screencols - 1 : erow.size
 	case auto_cast EditorKey.PAGE_UP:
 		fallthrough
 	case auto_cast EditorKey.PAGE_DOWN:
