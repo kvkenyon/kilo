@@ -23,10 +23,13 @@ Winsize :: struct {
 
 
 KILO_VERSION :: "0.0.1"
+KILO_TAB_STOP :: 8
 
 ERow :: struct {
-	size:  uint,
-	chars: [dynamic]byte,
+	size:   uint,
+	chars:  [dynamic]byte,
+	rsize:  uint,
+	render: [dynamic]byte,
 }
 
 EditorConfig :: struct {
@@ -34,11 +37,13 @@ EditorConfig :: struct {
 	screenrows:   uint,
 	screencols:   uint,
 	cx:           uint,
+	rx:           uint,
 	cy:           uint,
 	rows:         [dynamic]ERow,
 	numrows:      uint,
 	coloffset:    uint,
 	rowoffset:    uint,
+	filename:     string,
 }
 
 EditorKey :: enum {
@@ -110,6 +115,7 @@ enable_raw_mode :: proc "c" () {
 /* File I/O */
 
 editor_open :: proc(filepath: string) {
+	E.filename = filepath
 	data, ok := os.read_entire_file(filepath, context.allocator)
 	if ok != nil do die("read_entire_file")
 	defer delete(data, context.allocator)
@@ -117,22 +123,56 @@ editor_open :: proc(filepath: string) {
 	for line in strings.split_lines_iterator(&it) do editor_append_row(line)
 }
 
+editor_update_row :: proc(erow: ^ERow) {
+	tabs := 0
+	for i in 0 ..< erow.size {
+		if erow.chars[i] == '\t' do tabs += 1
+	}
+
+	clear(&erow.render)
+	erow.rsize = 0
+	erow.render = make([dynamic]byte, 0, 128)
+
+	idx: uint = 0
+	for j in 0 ..< erow.size {
+		if erow.chars[j] == '\t' {
+			append(&erow.render, ' ')
+			idx += 1
+			for idx % KILO_TAB_STOP != 0 {
+				append(&erow.render, ' ')
+				idx += 1
+			}
+		} else {
+			append(&erow.render, erow.chars[j])
+			idx += 1
+		}
+	}
+
+	erow.rsize = idx
+}
 
 editor_append_row :: proc(line: string) {
-	erow := ERow{}
+	erow := ERow {
+		size   = len(line),
+		rsize  = 0,
+		chars  = make([dynamic]byte, 0, 128),
+		render = make([dynamic]byte, 0, 128),
+	}
 	append(&erow.chars, line)
-	erow.size = len(line)
 	append(&E.rows, erow)
+
+	editor_update_row(&E.rows[E.numrows])
 	E.numrows += 1
 }
 
 /* Editor */
 
 init_editor :: proc() {
-	log.info("init_editor")
 	E.cx, E.cy, E.numrows, E.rowoffset, E.coloffset = 0, 0, 0, 0, 0
+	E.filename = ""
 	if res := get_window_size(&E.screencols, &E.screenrows); res == -1 do die("get_window_size")
 	log.infof("window_size = (%d, %d)", E.screenrows, E.screencols)
+	E.screenrows -= 1
 }
 
 
@@ -167,6 +207,24 @@ get_cursor_position :: proc(rows: ^uint, cols: ^uint) -> int {
 	if res != 2 do return -1
 	return 0
 }
+editor_draw_status_bar :: proc(abuf: ^[dynamic]byte) {
+	append(abuf, "\x1b[7m")
+	status: [80]byte
+	status_s := fmt.bprintf(
+		status[:],
+		"%.20s - %d lines",
+		E.filename != "" ? E.filename : "[No Name]",
+		E.numrows,
+	)
+	len := len(status_s)
+	if len > cast(int)E.screencols do len = cast(int)E.screencols
+	append(abuf, ..status[:])
+	for len < cast(int)E.screencols {
+		append(abuf, " ")
+		len += 1
+	}
+	append(abuf, "\x1b[m")
+}
 
 
 editor_draw_rows :: proc(abuf: ^[dynamic]byte) {
@@ -192,44 +250,55 @@ editor_draw_rows :: proc(abuf: ^[dynamic]byte) {
 			} else {
 				append(abuf, "~")
 			}
+		} else if (filerow >= E.numrows) {
+			break
 		} else {
 			erow := E.rows[filerow]
 			// Cast to int to allow negatives.
-			len := cast(int)erow.size - cast(int)E.coloffset
+			len := cast(int)erow.rsize - cast(int)E.coloffset
+			log.infof("y=%d erow.rsize = %d E.coloffset = %d", y, erow.rsize, E.coloffset)
 			if len < 0 do len = 0
 			if len > cast(int)E.screencols do len = cast(int)E.screencols
+			log.infof("len = %d", len)
 			for i in E.coloffset ..< E.coloffset + cast(uint)len {
-				append(abuf, erow.chars[i])
+				append(abuf, erow.render[i])
 			}
 		}
 		append(abuf, "\x1b[K") // Clear the line.
-		if (y < E.screenrows - 1) do append(abuf, "\r\n")
+		append(abuf, "\r\n")
 	}
 }
 
+editor_cx_to_rx :: proc(erow: ^ERow, cx: uint) -> uint {
+	idx: uint = 0
+	for i in 0 ..< cx {
+		if erow.chars[i] == '\t' {
+			idx += 1
+			for idx % KILO_TAB_STOP != 0 {
+				idx += 1
+			}
+		} else {
+			idx += 1
+		}
+
+	}
+	return idx
+}
+
 editor_scroll :: proc() {
-	log.infof(
-		"before scroll: E.cy=%d E.rowoffset=%d E.cx=%d E.coloffset=%d",
-		E.cy,
-		E.rowoffset,
-		E.cx,
-		E.coloffset,
-	)
-	if E.cx < E.coloffset do E.coloffset = E.cx
-	if E.cx > E.coloffset + E.screencols - 1 {
-		E.coloffset = E.cx - E.screencols + 1
+	E.rx = 0
+	if E.cy < E.numrows {
+		E.rx = editor_cx_to_rx(&E.rows[E.cy], E.cx)
+	}
+
+	if E.rx < E.coloffset do E.coloffset = E.rx
+	if E.rx > E.coloffset + E.screencols - 1 {
+		E.coloffset = E.rx - E.screencols + 1
 	}
 	if E.cy < E.rowoffset do E.rowoffset = E.cy
 	if E.cy > E.rowoffset + E.screenrows - 1 {
 		E.rowoffset = E.cy - E.screenrows + 1
 	}
-	log.infof(
-		"after scroll: E.cy=%d E.rowoffset=%d E.cx=%d E.coloffset=%d",
-		E.cy,
-		E.rowoffset,
-		E.cx,
-		E.coloffset,
-	)
 }
 
 
@@ -239,13 +308,14 @@ editor_refresh_screen :: proc() {
 	append(&abuf, "\x1b[?25l")
 	append(&abuf, "\x1b[H")
 	editor_draw_rows(&abuf)
+	editor_draw_status_bar(&abuf)
 	// Draw cursor
 	buf: [32]byte
 	draw_cursor := fmt.bprintf(
 		buf[:],
 		"\x1b[%d;%dH",
 		(E.cy - E.rowoffset) + 1,
-		(E.cx - E.coloffset) + 1,
+		(E.rx - E.coloffset) + 1,
 	)
 	append(&abuf, draw_cursor)
 	append(&abuf, "\x1b[?25h")
@@ -269,10 +339,16 @@ editor_move_cursor :: proc(key: int) {
 	case auto_cast EditorKey.ARROW_LEFT:
 		if E.cx != 0 {
 			E.cx -= 1
+		} else if E.cy > 0 {
+			E.cy -= 1
+			E.cx = E.rows[E.cy].size
 		}
 	case auto_cast EditorKey.ARROW_RIGHT:
 		if E.cx < erow.size {
 			E.cx += 1
+		} else if E.cx == erow.size && E.cy < E.numrows {
+			E.cy += 1
+			E.cx = 0
 		}
 	}
 	erow = E.cy < E.numrows ? E.rows[E.cy] : ERow{}
@@ -296,11 +372,18 @@ editor_process_key_presses :: proc() {
 	case auto_cast EditorKey.PAGE_UP:
 		fallthrough
 	case auto_cast EditorKey.PAGE_DOWN:
-		times: uint = E.screenrows - 1
-		for i: uint = 0; i < times; i += 1 {
+		if c == auto_cast EditorKey.PAGE_UP {
+			E.cy = E.rowoffset
+		} else if c == auto_cast EditorKey.PAGE_DOWN {
+			E.cy = E.rowoffset + E.screenrows - 1
+			if E.cy > E.numrows do E.cy = E.numrows
+		}
+		times := E.screenrows - 1
+		for times > 0 {
 			editor_move_cursor(
 				c == auto_cast EditorKey.PAGE_UP ? auto_cast EditorKey.ARROW_UP : auto_cast EditorKey.ARROW_DOWN,
 			)
+			times -= 1
 		}
 	case auto_cast EditorKey.ARROW_UP:
 		fallthrough
