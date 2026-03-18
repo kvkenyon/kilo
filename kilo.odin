@@ -6,6 +6,7 @@ import "core:os"
 import "core:strings"
 import "core:sys/darwin"
 import "core:sys/posix"
+import "core:time"
 
 foreign import libc2 "system:c"
 
@@ -33,17 +34,19 @@ ERow :: struct {
 }
 
 EditorConfig :: struct {
-	orig_termios: posix.termios,
-	screenrows:   uint,
-	screencols:   uint,
-	cx:           uint,
-	rx:           uint,
-	cy:           uint,
-	rows:         [dynamic]ERow,
-	numrows:      uint,
-	coloffset:    uint,
-	rowoffset:    uint,
-	filename:     string,
+	orig_termios:   posix.termios,
+	screenrows:     uint,
+	screencols:     uint,
+	cx:             uint,
+	rx:             uint,
+	cy:             uint,
+	rows:           [dynamic]ERow,
+	numrows:        uint,
+	coloffset:      uint,
+	rowoffset:      uint,
+	filename:       string,
+	statusmsg_time: time.Time,
+	statusmsg:      string,
 }
 
 EditorKey :: enum {
@@ -172,7 +175,7 @@ init_editor :: proc() {
 	E.filename = ""
 	if res := get_window_size(&E.screencols, &E.screenrows); res == -1 do die("get_window_size")
 	log.infof("window_size = (%d, %d)", E.screenrows, E.screencols)
-	E.screenrows -= 1
+	E.screenrows -= 2
 }
 
 
@@ -207,6 +210,7 @@ get_cursor_position :: proc(rows: ^uint, cols: ^uint) -> int {
 	if res != 2 do return -1
 	return 0
 }
+
 editor_draw_status_bar :: proc(abuf: ^[dynamic]byte) {
 	append(abuf, "\x1b[7m")
 	status: [80]byte
@@ -216,21 +220,45 @@ editor_draw_status_bar :: proc(abuf: ^[dynamic]byte) {
 		E.filename != "" ? E.filename : "[No Name]",
 		E.numrows,
 	)
-	len := len(status_s)
-	if len > cast(int)E.screencols do len = cast(int)E.screencols
+	slen := len(status_s)
+	rstatus: [80]byte
+	curr_row := E.cy + 1
+	rstatus_s := fmt.bprintf(rstatus[:], "%d/%d", curr_row, E.numrows)
+	rlen := len(rstatus_s)
+	if slen > cast(int)E.screencols do slen = cast(int)E.screencols
 	append(abuf, ..status[:])
-	for len < cast(int)E.screencols {
+	for slen < cast(int)E.screencols {
+		if cast(int)E.screencols - rlen == slen {
+			append(abuf, ..rstatus[:])
+			break
+		}
 		append(abuf, " ")
-		len += 1
+		slen += 1
 	}
 	append(abuf, "\x1b[m")
+	append(abuf, "\r\n")
+}
+
+editor_draw_message_bar :: proc(ab: ^[dynamic]byte) {
+	append(ab, "\x1b[K")
+	msglen := len(E.statusmsg)
+	if msglen > cast(int)E.screencols do msglen = cast(int)E.screencols
+	dur := time.diff(E.statusmsg_time, time.now())
+	sec := time.duration_seconds(dur)
+	if msglen != 0 && sec < 5.0 do append(ab, E.statusmsg)
+}
+
+editor_set_status_message :: proc(fmt_string: string, args: ..any) {
+	statusmsg := fmt.tprintf(fmt_string, ..args)
+	E.statusmsg = statusmsg
+	E.statusmsg_time = time.now()
 }
 
 
 editor_draw_rows :: proc(abuf: ^[dynamic]byte) {
 	for y: uint = 0; y < E.screenrows; y += 1 {
 		filerow := y + E.rowoffset
-		if y >= E.numrows {
+		if filerow >= E.numrows {
 			if y == E.screenrows / 3 && E.numrows == 0 {
 				welcome: [80]byte
 				welcome_string := fmt.bprintf(
@@ -250,8 +278,6 @@ editor_draw_rows :: proc(abuf: ^[dynamic]byte) {
 			} else {
 				append(abuf, "~")
 			}
-		} else if (filerow >= E.numrows) {
-			break
 		} else {
 			erow := E.rows[filerow]
 			// Cast to int to allow negatives.
@@ -309,6 +335,7 @@ editor_refresh_screen :: proc() {
 	append(&abuf, "\x1b[H")
 	editor_draw_rows(&abuf)
 	editor_draw_status_bar(&abuf)
+	editor_draw_message_bar(&abuf)
 	// Draw cursor
 	buf: [32]byte
 	draw_cursor := fmt.bprintf(
@@ -329,7 +356,7 @@ editor_move_cursor :: proc(key: int) {
 	erow := E.cy < E.numrows ? E.rows[E.cy] : ERow{}
 	switch key {
 	case auto_cast EditorKey.ARROW_DOWN:
-		if E.cy < E.numrows {
+		if E.cy < E.numrows - 1 {
 			E.cy += 1
 		}
 	case auto_cast EditorKey.ARROW_UP:
@@ -476,6 +503,7 @@ main :: proc() {
 	context.logger = logger
 
 	enable_raw_mode()
+	editor_set_status_message("HELP: Ctrl-Q = quit")
 	init_editor()
 	if len(os.args) >= 2 {
 		editor_open(os.args[1])
