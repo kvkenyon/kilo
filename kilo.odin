@@ -50,6 +50,7 @@ EditorConfig :: struct {
 }
 
 EditorKey :: enum {
+	BACKSPACE = 127,
 	ARROW_UP = 1000,
 	ARROW_DOWN,
 	ARROW_LEFT,
@@ -66,7 +67,7 @@ EditorKey :: enum {
 E: EditorConfig
 
 
-/* Helpers */
+/* helpers */
 
 write_stdout :: proc(s: string) -> (n: int, err: os.Error) {
 	return os.write(os.stdout, transmute([]u8)s)
@@ -78,7 +79,7 @@ posix_write_stdout :: proc "c" (s: string) {
 }
 
 
-/* Terminal */
+/* terminal */
 
 die :: proc "c" (s: cstring) -> int {
 	posix_write_stdout("\x1b[2J")
@@ -115,7 +116,7 @@ enable_raw_mode :: proc "c" () {
 	}
 }
 
-/* File I/O */
+/* file io */
 
 editor_open :: proc(filepath: string) {
 	E.filename = filepath
@@ -124,6 +125,33 @@ editor_open :: proc(filepath: string) {
 	defer delete(data, context.allocator)
 	it := string(data)
 	for line in strings.split_lines_iterator(&it) do editor_append_row(line)
+}
+
+editor_rows_to_string :: proc() -> string {
+	b, err := strings.builder_make()
+	if err != nil {
+		die("editor_rows_to_string")
+	}
+	for erow in E.rows {
+		strings.write_bytes(&b, erow.chars[:])
+		strings.write_byte(&b, '\n')
+	}
+	return strings.to_string(b)
+}
+
+editor_save :: proc() {
+	if E.filename == "" do return
+	content := editor_rows_to_string()
+	err := os.write_entire_file_from_string(E.filename, content)
+	if err != nil do die("editor_save")
+}
+
+/* row ops */
+
+editor_row_insert_char :: proc(erow: ^ERow, c: byte, at: int) {
+	inject_at(&erow.chars, at, c)
+	erow.size += 1
+	editor_update_row(erow)
 }
 
 editor_update_row :: proc(erow: ^ERow) {
@@ -168,7 +196,17 @@ editor_append_row :: proc(line: string) {
 	E.numrows += 1
 }
 
-/* Editor */
+/* editor ops */
+
+editor_insert_char :: proc(c: byte) {
+	if E.cy == E.numrows {
+		editor_append_row("")
+	}
+	editor_row_insert_char(&E.rows[E.cy], c, cast(int)E.cx)
+	E.cx += 1
+}
+
+/* startup */
 
 init_editor :: proc() {
 	E.cx, E.cy, E.numrows, E.rowoffset, E.coloffset = 0, 0, 0, 0, 0
@@ -210,6 +248,8 @@ get_cursor_position :: proc(rows: ^uint, cols: ^uint) -> int {
 	if res != 2 do return -1
 	return 0
 }
+
+/* render */
 
 editor_draw_status_bar :: proc(abuf: ^[dynamic]byte) {
 	append(abuf, "\x1b[7m")
@@ -350,7 +390,8 @@ editor_refresh_screen :: proc() {
 }
 
 
-/* Input */
+/* input */
+
 
 editor_move_cursor :: proc(key: int) {
 	erow := E.cy < E.numrows ? E.rows[E.cy] : ERow{}
@@ -387,6 +428,10 @@ editor_move_cursor :: proc(key: int) {
 editor_process_key_presses :: proc() {
 	c: int = editor_read_key()
 	switch c {
+	case '\r':
+		break
+	case ctrl_key('s'):
+		editor_save()
 	case ctrl_key('q'):
 		write_stdout("\x1b[2J")
 		write_stdout("\x1b[H")
@@ -420,8 +465,18 @@ editor_process_key_presses :: proc() {
 		fallthrough
 	case auto_cast EditorKey.ARROW_LEFT:
 		editor_move_cursor(c)
+	case ctrl_key('h'):
+		break
+	case auto_cast EditorKey.BACKSPACE:
+		break
 	case auto_cast EditorKey.DELETE_KEY:
+		break
+	case ctrl_key('l'):
 		fallthrough
+	case '\x1b':
+		break
+	case:
+		editor_insert_char(cast(byte)c)
 	}
 }
 
